@@ -249,7 +249,6 @@ function mapBoxUV(geometry, tiles /* {px,nx,py,ny,pz,nz} */) {
   for (let f=0; f<6; f++) {
     const rect = tileUVRect(tiles[faces[f]]);
     const o = f * 8;
-    // Set in consistent winding (may flip on some faces but it's ok for simple tiles)
     uv[o+0] = rect.u1; uv[o+1] = rect.v1;
     uv[o+2] = rect.u0; uv[o+3] = rect.v1;
     uv[o+4] = rect.u0; uv[o+5] = rect.v0;
@@ -443,13 +442,22 @@ const player = {
   onGround: false
 };
 
-// spawn on top of terrain
-(function placeSpawn(){
+function placeSpawn(){
   const sx = (WORLD_W/2)|0, sz = (WORLD_D/2)|0;
   let y = WORLD_H-2;
   while (y>0 && getBlock(sx,y,sz)===AIR) y--;
+  // spawn slightly above ground to settle
   player.pos.set(sx+0.5, y+3, sz+0.5);
-})();
+}
+
+function respawn() {
+  placeSpawn();
+  player.vel.set(0,0,0);
+  yaw = 0; pitch = 0;
+}
+
+// initial spawn
+placeSpawn();
 
 function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
 
@@ -495,9 +503,9 @@ function voxelRaycast(origin, dir, maxDist=6) {
   const stepY = dir.y > 0 ? 1 : -1;
   const stepZ = dir.z > 0 ? 1 : -1;
 
-  const tDeltaX = Math.abs(1 / dir.x);
-  const tDeltaY = Math.abs(1 / dir.y);
-  const tDeltaZ = Math.abs(1 / dir.z);
+  const tDeltaX = Math.abs(1 / (dir.x || 1e-9));
+  const tDeltaY = Math.abs(1 / (dir.y || 1e-9));
+  const tDeltaZ = Math.abs(1 / (dir.z || 1e-9));
 
   let tMaxX = ((stepX > 0 ? (x+1) - pos.x : pos.x - x)) * tDeltaX;
   let tMaxY = ((stepY > 0 ? (y+1) - pos.y : pos.y - y)) * tDeltaY;
@@ -629,26 +637,28 @@ function animate(t) {
   // Integrate & collide per axis (x,y,z)
   player.onGround = false;
   const hw = player.width/2, hh = player.height;
+
   // X
   player.pos.x += player.vel.x*dt;
   if (aabbIntersectsWorld(player.pos.x, player.pos.y, player.pos.z, hw, hh)) {
     player.pos.x -= player.vel.x*dt;
     player.vel.x = 0;
   }
-  // Y
+
+  // Y (gravity + collision resolution) — FIXED landing using ceil()
   player.pos.y += player.vel.y*dt;
   if (aabbIntersectsWorld(player.pos.x, player.pos.y, player.pos.z, hw, hh)) {
-    // resolve
     if (player.vel.y > 0) {
-      // moving up, hit ceiling
+      // Hit ceiling: place head just below the block above
       player.pos.y = Math.floor(player.pos.y + hh) - hh - 1e-3;
     } else {
-      // moving down, landed
-      player.pos.y = Math.floor(player.pos.y + 1e-3) + 1e-3;
+      // Landed: place feet just above the top surface
+      player.pos.y = Math.ceil(player.pos.y) + 1e-3;
       player.onGround = true;
     }
     player.vel.y = 0;
   }
+
   // Z
   player.pos.z += player.vel.z*dt;
   if (aabbIntersectsWorld(player.pos.x, player.pos.y, player.pos.z, hw, hh)) {
@@ -667,13 +677,15 @@ function animate(t) {
   const posAttr = water.geometry.attributes.position;
   const tsec = t/1000;
   for (let i=0;i<posAttr.count;i++) {
-    const x = posAttr.getX(i), y = posAttr.getY(i), z = posAttr.getZ(i);
+    const x = posAttr.getX(i), z = posAttr.getZ(i);
     const h = Math.sin((x+ tsec*1.5)*0.12) * 0.12 + Math.cos((z - tsec*1.2)*0.15)*0.12;
-    posAttr.setZ(i, z); // keep
     posAttr.setY(i, h);
   }
   posAttr.needsUpdate = true;
   water.geometry.computeVertexNormals();
+
+  // Safety: if somehow below the world, respawn
+  if (player.pos.y < -10) respawn();
 
   renderer.render(scene, camera);
 
